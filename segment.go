@@ -44,6 +44,11 @@ const (
 	OriginEB origin = "AWS::ElasticBeanstalk::Environment"
 )
 
+const (
+	GRPCMethod   string = "grpc_method"
+	AWSOperation string = "aws_operation"
+)
+
 var (
 	zeroSpanID = trace.SpanID{}
 	r          = rand.New(rand.NewSource(time.Now().UnixNano())) // random, not secure
@@ -147,8 +152,14 @@ type segment struct {
 
 	/* -- Used by SubSegments only ------------------------ */
 
+	AWS *awsinfo `json:"aws,omitempty"`
+
 	// Type indicates span is a subsegment; should either be subsegment or blank
 	Type string `json:"type,omitempty"`
+}
+
+type awsinfo struct {
+	Operation string `json:"operation,omitempty"`
 }
 
 type service struct {
@@ -389,17 +400,37 @@ func rawSegment(name string, span *trace.SpanData) segment {
 		startTime               = float64(startMicros) / 1e6
 		endMicros               = span.EndTime.UnixNano() / int64(time.Microsecond)
 		endTime                 = float64(endMicros) / 1e6
-		filtered, http          = makeHttp(span.Name, span.Code, span.Attributes)
 		isError, isFault, cause = makeCause(span.Status)
-		annotations             = makeAnnotations(span.Annotations, filtered)
 		namespace               string
+		awsAdditional           *awsinfo
 	)
 
 	if name == "" {
 		name = fixSegmentName(span.Name)
 	}
+	if nameOverride, ok := span.Attributes["name"]; ok {
+		name = nameOverride.(string)
+	}
+	if span.Name != "" {
+		if span.Attributes == nil {
+			span.Attributes = make(map[string]interface{})
+		}
+		span.Attributes["name"] = span.Name
+	}
 	if span.HasRemoteParent {
 		namespace = "remote"
+	}
+	if op, ok := span.Attributes[AWSOperation]; ok {
+		namespace = "aws"
+		awsAdditional = &awsinfo{Operation: op.(string)}
+	}
+	filtered, http := makeHttp(span.Name, span.Code, span.Attributes)
+	if method, ok := span.Attributes[GRPCMethod]; ok {
+		if http == nil {
+			http = &httpInfo{}
+		}
+		http.Request.Method = "GRPC"
+		http.Request.URL = method.(string)
 	}
 
 	return segment{
@@ -410,11 +441,12 @@ func rawSegment(name string, span *trace.SpanData) segment {
 		EndTime:     endTime,
 		Namespace:   namespace,
 		ParentID:    convertToAmazonSpanID(span.ParentSpanID),
-		Annotations: annotations,
+		Annotations: makeAnnotations(span.Annotations, filtered),
 		Http:        http,
 		Error:       isError,
 		Fault:       isFault,
 		Cause:       cause,
+		AWS:         awsAdditional,
 	}
 }
 
